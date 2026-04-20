@@ -1,109 +1,92 @@
-#include <windows.h>
+п»ї#include <windows.h>
 #include <stdio.h>
 #include <string.h>
 #include <sddl.h>
 #include <locale.h>
 #include <process.h>
 #include <stdlib.h>
+#include <fcntl.h>
+#include <io.h>
 
-#define PIPE_NAME "\\\\.\\pipe\\ChatPipe"
-#define BUFFER_SIZE 1024
+#define PIPE_NAME L"\\\\.\\pipe\\ChatPipe"
+#define BUFFER_SIZE 1024  // С€РёСЂРѕРєРёС… СЃРёРјРІРѕР»РѕРІ
 #define MAX_CLIENTS 5
 
 typedef struct {
     HANDLE hPipe;
     DWORD clientId;
-    char name[50];
-    HANDLE hThread;
+    wchar_t name[50];
 } CLIENT_INFO;
 
 CLIENT_INFO* clients[MAX_CLIENTS];
 int clientCount = 0;
 CRITICAL_SECTION cs;
-HANDLE hMutex;  // Мьютекс для синхронизации
 
-// Функция рассылки сообщений всем клиентам
-void BroadcastMessage(const char* message, HANDLE excludePipe) {
+void BroadcastMessage(const wchar_t* message, HANDLE excludePipe) {
     EnterCriticalSection(&cs);
-
+    DWORD bytes = (wcslen(message) + 1) * sizeof(wchar_t);
     for (int i = 0; i < clientCount; i++) {
         if (clients[i] != NULL && clients[i]->hPipe != excludePipe) {
             DWORD bytesWritten;
-            WriteFile(clients[i]->hPipe, message, strlen(message) + 1, &bytesWritten, NULL);
+            WriteFile(clients[i]->hPipe, message, bytes, &bytesWritten, NULL);
         }
     }
-
     LeaveCriticalSection(&cs);
 }
 
-// Поток для обработки клиента
 unsigned int __stdcall ClientThread(void* param) {
     CLIENT_INFO* client = (CLIENT_INFO*)param;
     HANDLE hPipe = client->hPipe;
-    char buffer[BUFFER_SIZE];
+    wchar_t buffer[BUFFER_SIZE];
     DWORD bytesRead;
     BOOL connected = TRUE;
 
-    // Отправляем приветствие
-    char welcome[BUFFER_SIZE];
-    snprintf(welcome, BUFFER_SIZE, "Добро пожаловать в чат, %s!\n", client->name);
-    WriteFile(hPipe, welcome, strlen(welcome) + 1, &bytesRead, NULL);
+    wchar_t welcome[BUFFER_SIZE];
+    swprintf(welcome, BUFFER_SIZE, L"Р”РѕР±СЂРѕ РїРѕР¶Р°Р»РѕРІР°С‚СЊ РІ С‡Р°С‚, %s!\n", client->name);
+    WriteFile(hPipe, welcome, (wcslen(welcome) + 1) * sizeof(wchar_t), &bytesRead, NULL);
 
-    // Оповещаем всех о входе нового пользователя
-    char joinMsg[BUFFER_SIZE];
-    snprintf(joinMsg, BUFFER_SIZE, "Система: %s подключился к чату", client->name);
+    wchar_t joinMsg[BUFFER_SIZE];
+    swprintf(joinMsg, BUFFER_SIZE, L"РЎРёСЃС‚РµРјР°: %s РїРѕРґРєР»СЋС‡РёР»СЃСЏ Рє С‡Р°С‚Сѓ", client->name);
     BroadcastMessage(joinMsg, hPipe);
+    wprintf(L"[РЎРёСЃС‚РµРјР°]: %s РїРѕРґРєР»СЋС‡РёР»СЃСЏ. Р’СЃРµРіРѕ РєР»РёРµРЅС‚РѕРІ: %d\n", client->name, clientCount);
 
-    printf("[Система]: %s подключился. Всего клиентов: %d\n", client->name, clientCount);
-
-    // Цикл приема сообщений
     while (connected) {
-        memset(buffer, 0, BUFFER_SIZE);
-
-        // Читаем сообщение от клиента
-        if (!ReadFile(hPipe, buffer, BUFFER_SIZE, &bytesRead, NULL)) {
+        memset(buffer, 0, sizeof(buffer));
+        if (!ReadFile(hPipe, buffer, sizeof(buffer), &bytesRead, NULL)) {
             DWORD error = GetLastError();
             if (error != ERROR_BROKEN_PIPE && error != ERROR_NO_DATA) {
-                printf("[Ошибка]: ReadFile для %s, код: %d\n", client->name, error);
+                wprintf(L"[РћС€РёР±РєР°]: ReadFile РґР»СЏ %s, РєРѕРґ: %d\n", client->name, error);
             }
             break;
         }
+        if (bytesRead == 0) break;
+        buffer[bytesRead / sizeof(wchar_t)] = L'\0';
 
-        if (bytesRead == 0) {
+        if (wcscmp(buffer, L"/quit") == 0) {
+            wprintf(L"[%s]: РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ РІС‹С€РµР» РёР· С‡Р°С‚Р°\n", client->name);
             break;
         }
 
-        buffer[bytesRead] = '\0';
+        if (wcslen(buffer) > 0) {
+            wchar_t formattedMsg[BUFFER_SIZE];
+            swprintf(formattedMsg, BUFFER_SIZE, L"%s: %s", client->name, buffer);
+            wprintf(L"%s\n", formattedMsg);
 
-        // Проверка на выход
-        if (strcmp(buffer, "/quit") == 0) {
-            printf("[%s]: Пользователь вышел из чата\n", client->name);
-            break;
-        }
-
-        // Отправляем сообщение всем (включая отправителя для подтверждения)
-        if (strlen(buffer) > 0) {
-            char formattedMsg[BUFFER_SIZE];
-            snprintf(formattedMsg, BUFFER_SIZE, "%s: %s", client->name, buffer);
-            printf("%s\n", formattedMsg);
-
-            // Рассылаем всем клиентам
             EnterCriticalSection(&cs);
+            DWORD bytes = (wcslen(formattedMsg) + 1) * sizeof(wchar_t);
             for (int i = 0; i < clientCount; i++) {
                 if (clients[i] != NULL) {
                     DWORD bytesWritten;
-                    WriteFile(clients[i]->hPipe, formattedMsg, strlen(formattedMsg) + 1, &bytesWritten, NULL);
+                    WriteFile(clients[i]->hPipe, formattedMsg, bytes, &bytesWritten, NULL);
                 }
             }
             LeaveCriticalSection(&cs);
         }
     }
 
-    // Сохраняем имя перед удалением
-    char leaveName[50];
-    strcpy(leaveName, client->name);
+    wchar_t leaveName[50];
+    wcscpy(leaveName, client->name);
 
-    // Удаляем клиента из списка
     EnterCriticalSection(&cs);
     int index = -1;
     for (int i = 0; i < clientCount; i++) {
@@ -112,7 +95,6 @@ unsigned int __stdcall ClientThread(void* param) {
             break;
         }
     }
-
     if (index != -1) {
         for (int j = index; j < clientCount - 1; j++) {
             clients[j] = clients[j + 1];
@@ -121,45 +103,42 @@ unsigned int __stdcall ClientThread(void* param) {
     }
     LeaveCriticalSection(&cs);
 
-    // Оповещаем всех о выходе
-    char leaveMsg[BUFFER_SIZE];
-    snprintf(leaveMsg, BUFFER_SIZE, "Система: %s покинул чат", leaveName);
-
+    wchar_t leaveMsg[BUFFER_SIZE];
+    swprintf(leaveMsg, BUFFER_SIZE, L"РЎРёСЃС‚РµРјР°: %s РїРѕРєРёРЅСѓР» С‡Р°С‚", leaveName);
     EnterCriticalSection(&cs);
+    DWORD bytes = (wcslen(leaveMsg) + 1) * sizeof(wchar_t);
     for (int i = 0; i < clientCount; i++) {
         if (clients[i] != NULL) {
             DWORD bytesWritten;
-            WriteFile(clients[i]->hPipe, leaveMsg, strlen(leaveMsg) + 1, &bytesWritten, NULL);
+            WriteFile(clients[i]->hPipe, leaveMsg, bytes, &bytesWritten, NULL);
         }
     }
     LeaveCriticalSection(&cs);
 
-    // Закрываем соединение
     FlushFileBuffers(hPipe);
     DisconnectNamedPipe(hPipe);
     CloseHandle(hPipe);
 
-    printf("[Система]: %s отключился. Всего клиентов: %d\n", leaveName, clientCount);
+    wprintf(L"[РЎРёСЃС‚РµРјР°]: %s РѕС‚РєР»СЋС‡РёР»СЃСЏ. Р’СЃРµРіРѕ РєР»РёРµРЅС‚РѕРІ: %d\n", leaveName, clientCount);
 
     free(client);
     return 0;
 }
 
 int main() {
+    _setmode(_fileno(stdout), _O_U16TEXT);
+    _setmode(_fileno(stdin), _O_U16TEXT);
+    setlocale(LC_ALL, ".UTF8");
+
     HANDLE hPipe;
     PSECURITY_DESCRIPTOR pSD = NULL;
     SECURITY_ATTRIBUTES sa;
 
-    setlocale(LC_ALL, "rus");
-    SetConsoleCP(1251);
-    SetConsoleOutputCP(1251);
-
     InitializeCriticalSection(&cs);
 
-    // Настройка безопасности для Windows
     const char* sddlString = "D:(A;;GA;;;AU)";
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorA(sddlString, SDDL_REVISION_1, &pSD, NULL)) {
-        printf("Ошибка создания дескриптора безопасности: %d\n", GetLastError());
+        wprintf(L"РћС€РёР±РєР° СЃРѕР·РґР°РЅРёСЏ РґРµСЃРєСЂРёРїС‚РѕСЂР° Р±РµР·РѕРїР°СЃРЅРѕСЃС‚Рё: %d\n", GetLastError());
         DeleteCriticalSection(&cs);
         return 1;
     }
@@ -168,91 +147,84 @@ int main() {
     sa.lpSecurityDescriptor = pSD;
     sa.bInheritHandle = FALSE;
 
-    printf("=============================================\n");
-    printf("Чат-сервер запущен (макс. %d клиентов)\n", MAX_CLIENTS);
-    printf("=============================================\n\n");
+    wprintf(L"=============================================\n");
+    wprintf(L"Р§Р°С‚-СЃРµСЂРІРµСЂ (Unicode, РјР°РєСЃ. %d РєР»РёРµРЅС‚РѕРІ)\n", MAX_CLIENTS);
+    wprintf(L"=============================================\n\n");
 
     DWORD clientIdCounter = 0;
 
-    // Основной цикл сервера
     while (1) {
-        // Проверка лимита клиентов
         if (clientCount >= MAX_CLIENTS) {
-            printf("[Система]: Достигнут лимит клиентов (%d). Ожидание...\n", MAX_CLIENTS);
+            wprintf(L"[РЎРёСЃС‚РµРјР°]: Р”РѕСЃС‚РёРіРЅСѓС‚ Р»РёРјРёС‚ РєР»РёРµРЅС‚РѕРІ (%d). РћР¶РёРґР°РЅРёРµ...\n", MAX_CLIENTS);
             Sleep(1000);
             continue;
         }
 
-        // Создание именованного канала
-        hPipe = CreateNamedPipe(
-            TEXT(PIPE_NAME),
+        hPipe = CreateNamedPipeW(
+            PIPE_NAME,
             PIPE_ACCESS_DUPLEX,
             PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
             PIPE_UNLIMITED_INSTANCES,
-            BUFFER_SIZE,
-            BUFFER_SIZE,
+            BUFFER_SIZE * sizeof(wchar_t),
+            BUFFER_SIZE * sizeof(wchar_t),
             0,
             &sa
         );
 
         if (hPipe == INVALID_HANDLE_VALUE) {
-            printf("Ошибка CreateNamedPipe: %d\n", GetLastError());
+            wprintf(L"РћС€РёР±РєР° CreateNamedPipe: %d\n", GetLastError());
             Sleep(1000);
             continue;
         }
 
-        printf("Ожидание подключения клиента...\n");
+        wprintf(L"РћР¶РёРґР°РЅРёРµ РїРѕРґРєР»СЋС‡РµРЅРёСЏ РєР»РёРµРЅС‚Р°...\n");
 
-        // Ожидание подключения
         BOOL connected = ConnectNamedPipe(hPipe, NULL);
         if (!connected && GetLastError() != ERROR_PIPE_CONNECTED) {
-            printf("Ошибка ConnectNamedPipe: %d\n", GetLastError());
+            wprintf(L"РћС€РёР±РєР° ConnectNamedPipe: %d\n", GetLastError());
             CloseHandle(hPipe);
             continue;
         }
 
-        printf("Клиент подключился! Получение имени...\n");
+        wprintf(L"РљР»РёРµРЅС‚ РїРѕРґРєР»СЋС‡РёР»СЃСЏ! РџРѕР»СѓС‡РµРЅРёРµ РёРјРµРЅРё...\n");
 
-        // Чтение имени клиента
-        char clientName[50];
+        wchar_t clientName[50];
         DWORD bytesRead;
         BOOL readResult = ReadFile(hPipe, clientName, sizeof(clientName), &bytesRead, NULL);
 
         if (!readResult || bytesRead == 0) {
-            printf("Ошибка чтения имени клиента\n");
+            wprintf(L"РћС€РёР±РєР° С‡С‚РµРЅРёСЏ РёРјРµРЅРё РєР»РёРµРЅС‚Р°\n");
             DisconnectNamedPipe(hPipe);
             CloseHandle(hPipe);
             continue;
         }
 
-        clientName[bytesRead] = '\0';
-        // Удаляем символы новой строки
-        clientName[strcspn(clientName, "\r\n")] = 0;
+        clientName[bytesRead / sizeof(wchar_t)] = L'\0';
+        clientName[wcscspn(clientName, L"\r\n")] = L'\0';
 
-        if (strlen(clientName) == 0) {
-            strcpy(clientName, "Аноним");
+        if (wcslen(clientName) == 0) {
+            wcscpy(clientName, L"РђРЅРѕРЅРёРј");
         }
 
-        // Создание структуры клиента
         CLIENT_INFO* newClient = (CLIENT_INFO*)malloc(sizeof(CLIENT_INFO));
         newClient->hPipe = hPipe;
         newClient->clientId = ++clientIdCounter;
-        strcpy(newClient->name, clientName);
+        wcscpy(newClient->name, clientName);
 
-        // Добавление в список клиентов
         EnterCriticalSection(&cs);
         clients[clientCount++] = newClient;
         LeaveCriticalSection(&cs);
 
-        // Создание потока для клиента
-        newClient->hThread = (HANDLE)_beginthreadex(NULL, 0, ClientThread, newClient, 0, NULL);
-
-        if (newClient->hThread == NULL) {
-            printf("Ошибка создания потока для клиента\n");
+        HANDLE hThread = (HANDLE)_beginthreadex(NULL, 0, ClientThread, newClient, 0, NULL);
+        if (hThread == NULL) {
+            wprintf(L"РћС€РёР±РєР° СЃРѕР·РґР°РЅРёСЏ РїРѕС‚РѕРєР° РґР»СЏ РєР»РёРµРЅС‚Р°\n");
             EnterCriticalSection(&cs);
             clientCount--;
             LeaveCriticalSection(&cs);
             free(newClient);
+        }
+        else {
+            CloseHandle(hThread);
         }
     }
 

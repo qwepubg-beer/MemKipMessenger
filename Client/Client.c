@@ -1,80 +1,33 @@
 ﻿#include <windows.h>
 #include <stdio.h>
-#include <string.h>
 #include <locale.h>
-#include <stdbool.h>
-#include <fcntl.h>
-#include <io.h>
-#include <process.h>
 
 #define PIPE_NAME L"\\\\.\\pipe\\ChatPipe"
-#define BUFFER_SIZE 1024  // количество широких символов
-
-HANDLE hPipe;
-CRITICAL_SECTION csConsole;
-volatile BOOL connected = TRUE;
-
-// Поток приёма сообщений
-unsigned __stdcall ReceiveThread(void* param) {
-    wchar_t buffer[BUFFER_SIZE];
-    DWORD bytesRead;
-
-    while (connected) {
-        memset(buffer, 0, sizeof(buffer));
-
-        if (!ReadFile(hPipe, buffer, sizeof(buffer), &bytesRead, NULL)) {
-            DWORD error = GetLastError();
-            if (connected && error != ERROR_BROKEN_PIPE) {
-                EnterCriticalSection(&csConsole);
-                wprintf(L"\n[Система]: Ошибка чтения: %d\n", error);
-                wprintf(L"[Система]: Соединение с сервером потеряно\n");
-                LeaveCriticalSection(&csConsole);
-            }
-            connected = FALSE;
-            break;
-        }
-
-        if (bytesRead > 0) {
-            buffer[bytesRead / sizeof(wchar_t)] = L'\0'; // гарантируем завершение
-            EnterCriticalSection(&csConsole);
-            wprintf(L"\n%s\n", buffer);
-            wprintf(L"Вы: ");
-            fflush(stdout);
-            LeaveCriticalSection(&csConsole);
-        }
-    }
-    return 0;
-}
+#define BUFFER_SIZE 1024
 
 int main() {
-    // Настройка консоли на Unicode (UTF-16)
-    _setmode(_fileno(stdout), _O_U16TEXT);
-    _setmode(_fileno(stdin), _O_U16TEXT);
-    setlocale(LC_ALL, ".UTF8");
+    setlocale(LC_ALL, "");
+    SetConsoleCP(65001);
+    SetConsoleOutputCP(65001);
 
+    HANDLE hPipe;
     wchar_t buffer[BUFFER_SIZE];
-    wchar_t userName[50];
+    wchar_t clientName[64];
+    DWORD bytesRead, bytesWritten;
 
-    InitializeCriticalSection(&csConsole);
-
-    wprintf(L"=====================================\n");
-    wprintf(L"       Чат-клиент (Unicode)\n");
-    wprintf(L"=====================================\n\n");
+    wprintf(L"Клиент запущен. Подключение к серверу...\n");
 
     wprintf(L"Введите ваше имя: ");
-    fgetws(userName, 50, stdin);
-    userName[wcscspn(userName, L"\r\n")] = L'\0';
+    HANDLE hStdIn = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD charsRead;
+    ReadConsoleW(hStdIn, clientName, 64, &charsRead, NULL);
+    if (charsRead >= 2 && clientName[charsRead - 2] == L'\r')
+        clientName[charsRead - 2] = L'\0';
+    else
+        clientName[charsRead] = L'\0';
 
-    if (wcslen(userName) == 0) {
-        wcscpy(userName, L"Аноним");
-    }
-
-    wprintf(L"\nПодключение к серверу...\n");
-
-    if (!WaitNamedPipeW(PIPE_NAME, 5000)) {
-        wprintf(L"Ошибка: Сервер не запущен или не отвечает\n");
-        wprintf(L"Убедитесь, что сервер запущен и повторите попытку\n");
-        DeleteCriticalSection(&csConsole);
+    if (!WaitNamedPipeW(PIPE_NAME, NMPWAIT_WAIT_FOREVER)) {
+        wprintf(L"WaitNamedPipe не удался. Ошибка: %d\n", GetLastError());
         return 1;
     }
 
@@ -85,79 +38,51 @@ int main() {
         NULL,
         OPEN_EXISTING,
         0,
-        NULL
-    );
+        NULL);
 
     if (hPipe == INVALID_HANDLE_VALUE) {
-        wprintf(L"Ошибка подключения к серверу. Код: %d\n", GetLastError());
-        DeleteCriticalSection(&csConsole);
+        wprintf(L"CreateFile не удался. Ошибка: %d\n", GetLastError());
         return 1;
     }
 
-    DWORD pipeMode = PIPE_READMODE_MESSAGE;
-    if (!SetNamedPipeHandleState(hPipe, &pipeMode, NULL, NULL)) {
-        wprintf(L"Ошибка установки режима канала\n");
-        CloseHandle(hPipe);
-        DeleteCriticalSection(&csConsole);
-        return 1;
-    }
+    wprintf(L"Подключено к серверу!\n");
+    wprintf(L"=============================================\n");
 
     // Отправляем имя серверу
-    DWORD bytesWritten;
-    if (!WriteFile(hPipe, userName, (wcslen(userName) + 1) * sizeof(wchar_t), &bytesWritten, NULL)) {
-        wprintf(L"Ошибка отправки имени\n");
+    DWORD bytesToWrite = (DWORD)(wcslen(clientName) + 1) * sizeof(wchar_t);
+    if (!WriteFile(hPipe, clientName, bytesToWrite, &bytesWritten, NULL)) {
+        wprintf(L"Не удалось отправить имя серверу. Ошибка: %d\n", GetLastError());
         CloseHandle(hPipe);
-        DeleteCriticalSection(&csConsole);
         return 1;
     }
 
-    HANDLE hReadThread = (HANDLE)_beginthreadex(NULL, 0, ReceiveThread, NULL, 0, NULL);
-    if (hReadThread == NULL) {
-        wprintf(L"Ошибка создания потока приёма\n");
-        CloseHandle(hPipe);
-        DeleteCriticalSection(&csConsole);
-        return 1;
-    }
-    CloseHandle(hReadThread); // поток работает сам
+    while (1) {
+        wprintf(L"Вы (%s): ", clientName);
+        ReadConsoleW(hStdIn, buffer, BUFFER_SIZE, &charsRead, NULL);
+        if (charsRead >= 2 && buffer[charsRead - 2] == L'\r')
+            buffer[charsRead - 2] = L'\0';
+        else
+            buffer[charsRead] = L'\0';
 
-    wprintf(L"\n=====================================\n");
-    wprintf(L"Добро пожаловать в чат, %s!\n", userName);
-    wprintf(L"=====================================\n");
-    wprintf(L"Введите /quit для выхода\n");
-    wprintf(L"=====================================\n\n");
+        wchar_t formatted[BUFFER_SIZE + 64];
+        swprintf(formatted, BUFFER_SIZE + 64, L"%s: %s", clientName, buffer);
 
-    while (connected) {
-        wprintf(L"Вы: ");
-        fflush(stdout);
-
-        if (fgetws(buffer, BUFFER_SIZE, stdin) == NULL) {
+        bytesToWrite = (DWORD)(wcslen(formatted) + 1) * sizeof(wchar_t);
+        if (!WriteFile(hPipe, formatted, bytesToWrite, &bytesWritten, NULL)) {
+            wprintf(L"Не удалось отправить сообщение. Ошибка: %d\n", GetLastError());
             break;
         }
 
-        buffer[wcscspn(buffer, L"\r\n")] = L'\0';
-
-        if (wcslen(buffer) == 0) {
-            continue;
-        }
-
-        if (wcscmp(buffer, L"/quit") == 0) {
-            wprintf(L"Выход из чата...\n");
-            WriteFile(hPipe, buffer, (wcslen(buffer) + 1) * sizeof(wchar_t), &bytesWritten, NULL);
-            connected = FALSE;
+        wprintf(L"Ожидание ответа от сервера...\n");
+        if (!ReadFile(hPipe, buffer, BUFFER_SIZE * sizeof(wchar_t), &bytesRead, NULL) || bytesRead == 0) {
+            wprintf(L"Сервер отключился.\n");
             break;
         }
-
-        if (!WriteFile(hPipe, buffer, (wcslen(buffer) + 1) * sizeof(wchar_t), &bytesWritten, NULL)) {
-            wprintf(L"\n[Ошибка]: Не удалось отправить сообщение\n");
-            connected = FALSE;
-            break;
-        }
+        DWORD wcharsRead = bytesRead / sizeof(wchar_t);
+        buffer[wcharsRead] = L'\0';
+        wprintf(L"%s\n", buffer);
     }
 
-    connected = FALSE;
     CloseHandle(hPipe);
-    DeleteCriticalSection(&csConsole);
-    wprintf(L"Соединение закрыто.\n");
-
     return 0;
 }

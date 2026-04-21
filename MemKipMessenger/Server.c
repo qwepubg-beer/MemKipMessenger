@@ -2,35 +2,29 @@
 #include <stdio.h>
 #include <sddl.h>
 #include <locale.h>
-#include <shlobj.h>   // для SHCreateDirectoryExW (опционально)
 
 #define PIPE_NAME L"\\\\.\\pipe\\ChatPipe"
 #define BUFFER_SIZE 1024
 #define RECEIVED_FOLDER L".\\received_files\\"
 
-// Функция приёма файла от клиента
+// Приём файла от клиента
 void ReceiveFile(HANDLE hPipe, const wchar_t* header) {
     wchar_t fileName[MAX_PATH];
     DWORD fileSize;
 
-    // Парсим заголовок: "/file <имя> <размер>"
     if (swscanf(header, L"/file %s %lu", fileName, &fileSize) != 2) {
         wprintf(L"Ошибка разбора заголовка файла\n");
         return;
     }
 
-    // Создаём папку для сохранения, если её нет
     CreateDirectoryW(RECEIVED_FOLDER, NULL);
-
     wchar_t fullPath[MAX_PATH];
     swprintf(fullPath, MAX_PATH, L"%s%s", RECEIVED_FOLDER, fileName);
 
-    // Создаём файл для записи
     HANDLE hFile = CreateFileW(fullPath, GENERIC_WRITE, 0, NULL,
         CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile == INVALID_HANDLE_VALUE) {
         wprintf(L"Не удалось создать файл: %s (ошибка %d)\n", fullPath, GetLastError());
-        // Пропускаем данные файла, чтобы не сбить протокол
         byte* dummy = (byte*)malloc(fileSize);
         DWORD bytesRead;
         ReadFile(hPipe, dummy, fileSize, &bytesRead, NULL);
@@ -38,7 +32,6 @@ void ReceiveFile(HANDLE hPipe, const wchar_t* header) {
         return;
     }
 
-    // Принимаем содержимое файла
     byte* fileBuffer = (byte*)malloc(fileSize);
     if (fileBuffer == NULL) {
         wprintf(L"Ошибка выделения памяти\n");
@@ -75,6 +68,65 @@ void ReceiveFile(HANDLE hPipe, const wchar_t* header) {
 
     free(fileBuffer);
     CloseHandle(hFile);
+}
+
+// Отправка файла клиенту
+void SendFileToClient(HANDLE hPipe, const wchar_t* filePath) {
+    HANDLE hFile = CreateFileW(filePath, GENERIC_READ, FILE_SHARE_READ, NULL,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        wprintf(L"Не удалось открыть файл: %s (ошибка %d)\n", filePath, GetLastError());
+        wchar_t errMsg[] = L"/file_error\0";
+        DWORD bytesWritten;
+        WriteFile(hPipe, errMsg, sizeof(errMsg), &bytesWritten, NULL);
+        return;
+    }
+
+    DWORD fileSize = GetFileSize(hFile, NULL);
+    if (fileSize == INVALID_FILE_SIZE) {
+        wprintf(L"Ошибка получения размера файла\n");
+        CloseHandle(hFile);
+        return;
+    }
+
+    const wchar_t* fileName = wcsrchr(filePath, L'\\');
+    if (fileName == NULL) fileName = wcsrchr(filePath, L'/');
+    if (fileName != NULL) fileName++;
+    else fileName = filePath;
+
+    wchar_t header[BUFFER_SIZE];
+    swprintf(header, BUFFER_SIZE, L"/file %s %lu", fileName, fileSize);
+    DWORD bytesWritten;
+    DWORD headerBytes = (wcslen(header) + 1) * sizeof(wchar_t);
+    if (!WriteFile(hPipe, header, headerBytes, &bytesWritten, NULL)) {
+        wprintf(L"Ошибка отправки заголовка файла\n");
+        CloseHandle(hFile);
+        return;
+    }
+
+    byte* fileBuffer = (byte*)malloc(fileSize);
+    if (fileBuffer == NULL) {
+        wprintf(L"Ошибка выделения памяти\n");
+        CloseHandle(hFile);
+        return;
+    }
+
+    DWORD bytesRead;
+    if (!ReadFile(hFile, fileBuffer, fileSize, &bytesRead, NULL) || bytesRead != fileSize) {
+        wprintf(L"Ошибка чтения файла\n");
+        free(fileBuffer);
+        CloseHandle(hFile);
+        return;
+    }
+    CloseHandle(hFile);
+
+    if (!WriteFile(hPipe, fileBuffer, fileSize, &bytesWritten, NULL) || bytesWritten != fileSize) {
+        wprintf(L"Ошибка отправки данных файла\n");
+    }
+    else {
+        wprintf(L"Файл '%s' (%lu байт) отправлен клиенту\n", fileName, fileSize);
+    }
+    free(fileBuffer);
 }
 
 int main() {
@@ -161,17 +213,32 @@ int main() {
             // Обычное сообщение
             wprintf(L"%s\n", buffer);
 
-            wprintf(L"Борисс: ");
+            // Ввод ответа сервера
+            wprintf(L"Сервер: ");
             HANDLE hStdIn = GetStdHandle(STD_INPUT_HANDLE);
             DWORD charsRead;
-            ReadConsoleW(hStdIn, buffer, BUFFER_SIZE, &charsRead, NULL);
-            if (charsRead >= 2 && buffer[charsRead - 2] == L'\r')
-                buffer[charsRead - 2] = L'\0';
+            wchar_t input[BUFFER_SIZE];
+            ReadConsoleW(hStdIn, input, BUFFER_SIZE, &charsRead, NULL);
+            if (charsRead >= 2 && input[charsRead - 2] == L'\r')
+                input[charsRead - 2] = L'\0';
             else
-                buffer[charsRead] = L'\0';
+                input[charsRead] = L'\0';
 
+            // Проверка на команду отправки файла
+            if (wcsncmp(input, L"/sendfile ", 10) == 0) {
+                wchar_t* filePath = input + 10;
+                if (filePath[0] == L'"') {
+                    filePath++;
+                    wchar_t* endQuote = wcschr(filePath, L'"');
+                    if (endQuote) *endQuote = L'\0';
+                }
+                SendFileToClient(hPipe, filePath);
+                continue;
+            }
+
+            // Обычное сообщение
             wchar_t formatted[BUFFER_SIZE + 64];
-            swprintf(formatted, BUFFER_SIZE + 64, L"Борисс: %s", buffer);
+            swprintf(formatted, BUFFER_SIZE + 64, L"Сервер: %s", input);
 
             DWORD bytesToWrite = (DWORD)(wcslen(formatted) + 1) * sizeof(wchar_t);
             if (!WriteFile(hPipe, formatted, bytesToWrite, &bytesWritten, NULL)) {

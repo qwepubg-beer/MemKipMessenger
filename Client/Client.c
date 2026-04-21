@@ -4,8 +4,67 @@
 
 #define PIPE_NAME L"\\\\.\\pipe\\ChatPipe"
 #define BUFFER_SIZE 1024
+#define RECEIVED_FOLDER L".\\received_files\\"
 
-// Функция отправки файла через канал
+// Приём файла от сервера
+void ReceiveFile(HANDLE hPipe, const wchar_t* header) {
+    wchar_t fileName[MAX_PATH];
+    DWORD fileSize;
+
+    if (swscanf(header, L"/file %s %lu", fileName, &fileSize) != 2) {
+        wprintf(L"Ошибка разбора заголовка файла\n");
+        return;
+    }
+
+    CreateDirectoryW(RECEIVED_FOLDER, NULL);
+    wchar_t fullPath[MAX_PATH];
+    swprintf(fullPath, MAX_PATH, L"%s%s", RECEIVED_FOLDER, fileName);
+
+    HANDLE hFile = CreateFileW(fullPath, GENERIC_WRITE, 0, NULL,
+        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        wprintf(L"Не удалось создать файл: %s (ошибка %d)\n", fullPath, GetLastError());
+        // Пропускаем данные файла, чтобы не нарушить протокол
+        byte* dummy = (byte*)malloc(fileSize);
+        DWORD bytesRead;
+        ReadFile(hPipe, dummy, fileSize, &bytesRead, NULL);
+        free(dummy);
+        return;
+    }
+
+    byte* fileBuffer = (byte*)malloc(fileSize);
+    if (fileBuffer == NULL) {
+        wprintf(L"Ошибка выделения памяти\n");
+        CloseHandle(hFile);
+        return;
+    }
+
+    DWORD totalRead = 0;
+    while (totalRead < fileSize) {
+        DWORD bytesRead;
+        DWORD toRead = min(BUFFER_SIZE * sizeof(wchar_t), fileSize - totalRead);
+        if (!ReadFile(hPipe, fileBuffer + totalRead, toRead, &bytesRead, NULL) || bytesRead == 0) {
+            wprintf(L"Ошибка чтения данных файла\n");
+            free(fileBuffer);
+            CloseHandle(hFile);
+            return;
+        }
+        totalRead += bytesRead;
+    }
+
+    DWORD bytesWritten;
+    if (!WriteFile(hFile, fileBuffer, fileSize, &bytesWritten, NULL) || bytesWritten != fileSize) {
+        wprintf(L"Ошибка записи файла на диск\n");
+    }
+    else {
+        wprintf(L"Файл '%s' (%lu байт) сохранён в %s\n", fileName, fileSize, fullPath);
+    }
+
+    free(fileBuffer);
+    CloseHandle(hFile);
+}
+
+// Отправка файла серверу
 void SendFile(HANDLE hPipe, const wchar_t* filePath) {
     HANDLE hFile = CreateFileW(filePath, GENERIC_READ, FILE_SHARE_READ, NULL,
         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -14,7 +73,6 @@ void SendFile(HANDLE hPipe, const wchar_t* filePath) {
         return;
     }
 
-    // Получаем размер файла
     DWORD fileSize = GetFileSize(hFile, NULL);
     if (fileSize == INVALID_FILE_SIZE) {
         wprintf(L"Ошибка получения размера файла\n");
@@ -22,13 +80,12 @@ void SendFile(HANDLE hPipe, const wchar_t* filePath) {
         return;
     }
 
-    // Извлекаем имя файла из пути
     const wchar_t* fileName = wcsrchr(filePath, L'\\');
     if (fileName == NULL) fileName = wcsrchr(filePath, L'/');
     if (fileName != NULL) fileName++;
     else fileName = filePath;
 
-    // Отправляем заголовок: "/file <имя> <размер>"
+    // Заголовок "/file <имя> <размер>"
     wchar_t header[BUFFER_SIZE];
     swprintf(header, BUFFER_SIZE, L"/file %s %lu", fileName, fileSize);
     DWORD bytesWritten;
@@ -39,7 +96,6 @@ void SendFile(HANDLE hPipe, const wchar_t* filePath) {
         return;
     }
 
-    // Отправляем содержимое файла
     byte* fileBuffer = (byte*)malloc(fileSize);
     if (fileBuffer == NULL) {
         wprintf(L"Ошибка выделения памяти\n");
@@ -127,7 +183,6 @@ int main() {
         // Проверка на команду /send
         if (wcsncmp(buffer, L"/send ", 6) == 0) {
             wchar_t* filePath = buffer + 6;
-            // Удаляем возможные кавычки
             if (filePath[0] == L'"') {
                 filePath++;
                 wchar_t* endQuote = wcschr(filePath, L'"');
@@ -154,6 +209,18 @@ int main() {
         }
         DWORD wcharsRead = bytesRead / sizeof(wchar_t);
         buffer[wcharsRead] = L'\0';
+
+        // Проверяем, не файл ли это
+        if (wcsncmp(buffer, L"/file ", 6) == 0) {
+            ReceiveFile(hPipe, buffer);
+            continue;
+        }
+        else if (wcscmp(buffer, L"/file_error") == 0) {
+            wprintf(L"Сервер не смог отправить файл (ошибка открытия)\n");
+            continue;
+        }
+
+        // Обычное сообщение
         wprintf(L"%s\n", buffer);
     }
 

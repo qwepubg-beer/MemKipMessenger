@@ -2,19 +2,89 @@
 #include <stdio.h>
 #include <sddl.h>
 #include <locale.h>
+#include <shlobj.h>   // для SHCreateDirectoryExW (опционально)
 
 #define PIPE_NAME L"\\\\.\\pipe\\ChatPipe"
 #define BUFFER_SIZE 1024
+#define RECEIVED_FOLDER L".\\received_files\\"
+
+// Функция приёма файла от клиента
+void ReceiveFile(HANDLE hPipe, const wchar_t* header) {
+    wchar_t fileName[MAX_PATH];
+    DWORD fileSize;
+
+    // Парсим заголовок: "/file <имя> <размер>"
+    if (swscanf(header, L"/file %s %lu", fileName, &fileSize) != 2) {
+        wprintf(L"Ошибка разбора заголовка файла\n");
+        return;
+    }
+
+    // Создаём папку для сохранения, если её нет
+    CreateDirectoryW(RECEIVED_FOLDER, NULL);
+
+    wchar_t fullPath[MAX_PATH];
+    swprintf(fullPath, MAX_PATH, L"%s%s", RECEIVED_FOLDER, fileName);
+
+    // Создаём файл для записи
+    HANDLE hFile = CreateFileW(fullPath, GENERIC_WRITE, 0, NULL,
+        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        wprintf(L"Не удалось создать файл: %s (ошибка %d)\n", fullPath, GetLastError());
+        // Пропускаем данные файла, чтобы не сбить протокол
+        byte* dummy = (byte*)malloc(fileSize);
+        DWORD bytesRead;
+        ReadFile(hPipe, dummy, fileSize, &bytesRead, NULL);
+        free(dummy);
+        return;
+    }
+
+    // Принимаем содержимое файла
+    byte* fileBuffer = (byte*)malloc(fileSize);
+    if (fileBuffer == NULL) {
+        wprintf(L"Ошибка выделения памяти\n");
+        CloseHandle(hFile);
+        return;
+    }
+
+    DWORD totalRead = 0;
+    while (totalRead < fileSize) {
+        DWORD bytesRead;
+        DWORD toRead = min(BUFFER_SIZE * sizeof(wchar_t), fileSize - totalRead);
+        if (!ReadFile(hPipe, fileBuffer + totalRead, toRead, &bytesRead, NULL) || bytesRead == 0) {
+            wprintf(L"Ошибка чтения данных файла\n");
+            free(fileBuffer);
+            CloseHandle(hFile);
+            return;
+        }
+        totalRead += bytesRead;
+    }
+
+    DWORD bytesWritten;
+    if (!WriteFile(hFile, fileBuffer, fileSize, &bytesWritten, NULL) || bytesWritten != fileSize) {
+        wprintf(L"Ошибка записи файла на диск\n");
+    }
+    else {
+        wprintf(L"Файл '%s' (%lu байт) сохранён в %s\n", fileName, fileSize, fullPath);
+
+        // Отправляем подтверждение клиенту
+        wchar_t confirm[BUFFER_SIZE];
+        swprintf(confirm, BUFFER_SIZE, L"Сервер: файл '%s' получен и сохранён", fileName);
+        DWORD msgBytes = (wcslen(confirm) + 1) * sizeof(wchar_t);
+        WriteFile(hPipe, confirm, msgBytes, &bytesWritten, NULL);
+    }
+
+    free(fileBuffer);
+    CloseHandle(hFile);
+}
 
 int main() {
     HANDLE hPipe;
     wchar_t buffer[BUFFER_SIZE];
-    wchar_t clientName[64];
+    wchar_t clientName[64] = L"Гость";
     DWORD bytesRead, bytesWritten;
     PSECURITY_DESCRIPTOR pSD = NULL;
     SECURITY_ATTRIBUTES sa;
 
-    // Устанавливаем локаль и режим консоли для Unicode
     setlocale(LC_ALL, "");
     SetConsoleCP(65001);
     SetConsoleOutputCP(65001);
@@ -57,9 +127,8 @@ int main() {
             break;
         }
 
-        // Читаем имя клиента (в широких символах)
+        // Получаем имя клиента
         if (ReadFile(hPipe, buffer, BUFFER_SIZE * sizeof(wchar_t), &bytesRead, NULL) && bytesRead > 0) {
-            // bytesRead содержит количество прочитанных байт, делим на sizeof(wchar_t)
             DWORD wcharsRead = bytesRead / sizeof(wchar_t);
             if (wcharsRead > 0) {
                 buffer[wcharsRead] = L'\0';
@@ -82,20 +151,24 @@ int main() {
             }
             DWORD wcharsRead = bytesRead / sizeof(wchar_t);
             buffer[wcharsRead] = L'\0';
+
+            // Проверка: это файл?
+            if (wcsncmp(buffer, L"/file ", 6) == 0) {
+                ReceiveFile(hPipe, buffer);
+                continue;
+            }
+
+            // Обычное сообщение
             wprintf(L"%s\n", buffer);
 
             wprintf(L"Борисс: ");
-            // Читаем ввод с консоли в широких символах
             HANDLE hStdIn = GetStdHandle(STD_INPUT_HANDLE);
             DWORD charsRead;
             ReadConsoleW(hStdIn, buffer, BUFFER_SIZE, &charsRead, NULL);
-            // Удаляем символы \r\n в конце
-            if (charsRead >= 2 && buffer[charsRead - 2] == L'\r') {
+            if (charsRead >= 2 && buffer[charsRead - 2] == L'\r')
                 buffer[charsRead - 2] = L'\0';
-            }
-            else {
+            else
                 buffer[charsRead] = L'\0';
-            }
 
             wchar_t formatted[BUFFER_SIZE + 64];
             swprintf(formatted, BUFFER_SIZE + 64, L"Борисс: %s", buffer);

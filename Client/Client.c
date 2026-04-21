@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include <locale.h>
 
-#define PIPE_NAME L"\\\\.\\pipe\\ChatPipe"
+#define PIPE_NAME L"\\\\KB37-312-C04\\pipe\\ChatPipe"
 #define BUFFER_SIZE 1024
 #define RECEIVED_FOLDER L".\\received_files\\"
 
@@ -162,6 +162,7 @@ int main() {
     }
 
     wprintf(L"Подключено к серверу!\n");
+    wprintf(L"команда /send путь в ковычках\n");
     wprintf(L"=============================================\n");
 
     // Отправляем имя серверу

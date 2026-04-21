@@ -153,7 +153,7 @@ int main() {
     sa.bInheritHandle = FALSE;
 
     wprintf(L"Сервер запущен с открытым доступом...\n");
-
+    wprintf(L"команда /sendfile путь в ковычках\n");
     hPipe = CreateNamedPipeW(
         PIPE_NAME,
         PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,

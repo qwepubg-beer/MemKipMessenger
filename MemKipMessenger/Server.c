@@ -209,7 +209,16 @@ int main() {
                 ReceiveFile(hPipe, buffer);
                 continue;
             }
-
+            else if (wcsncmp(buffer, L"/take", 6) == 0) {
+                wchar_t* filePath = input + 6;
+                if (filePath[0] == L'"') {
+                    filePath++;
+                    wchar_t* endQuote = wcschr(filePath, L'"');
+                    if (endQuote) *endQuote = L'\0';
+                }
+                SendFileToClient(hPipe, filePath);
+                continue;
+            }
             // Обычное сообщение
             wprintf(L"%s\n", buffer);
 
@@ -246,7 +255,6 @@ int main() {
                 break;
             }
         }
-
         DisconnectNamedPipe(hPipe);
     }
 

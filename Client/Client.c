@@ -194,6 +194,38 @@ int main() {
             continue;
         }
 
+        // Проверка на команду /take - отправляем как обычное сообщение на сервер
+        if (wcsncmp(buffer, L"/take ", 6) == 0) {
+            // Отправляем команду /take на сервер
+            bytesToWrite = (DWORD)(wcslen(buffer) + 1) * sizeof(wchar_t);
+            if (!WriteFile(hPipe, buffer, bytesToWrite, &bytesWritten, NULL)) {
+                wprintf(L"Не удалось отправить команду серверу. Ошибка: %d\n", GetLastError());
+                break;
+            }
+
+            // Ждем ответ от сервера (файл или сообщение об ошибке)
+            wprintf(L"Ожидание файла от сервера...\n");
+            if (!ReadFile(hPipe, buffer, BUFFER_SIZE * sizeof(wchar_t), &bytesRead, NULL) || bytesRead == 0) {
+                wprintf(L"Сервер отключился.\n");
+                break;
+            }
+
+            DWORD wcharsRead = bytesRead / sizeof(wchar_t);
+            buffer[wcharsRead] = L'\0';
+
+            // Проверяем, что пришло в ответ
+            if (wcsncmp(buffer, L"/file ", 6) == 0) {
+                ReceiveFile(hPipe, buffer);
+            }
+            else if (wcscmp(buffer, L"/file_error") == 0) {
+                wprintf(L"Сервер не смог отправить файл (ошибка открытия)\n");
+            }
+            else {
+                wprintf(L"%s\n", buffer);
+            }
+            continue;
+        }
+
         // Обычное сообщение
         wchar_t formatted[BUFFER_SIZE + 64];
         swprintf(formatted, BUFFER_SIZE + 64, L"%s: %s", clientName, buffer);

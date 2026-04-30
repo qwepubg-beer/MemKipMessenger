@@ -209,13 +209,17 @@ int main() {
                 ReceiveFile(hPipe, buffer);
                 continue;
             }
-            else if (wcsncmp(buffer, L"/take", 6) == 0) {
-                wchar_t* filePath = input + 6;
+            // Проверка на команду /take от клиента
+            else if (wcsncmp(buffer, L"/take ", 6) == 0) {
+                wchar_t* filePath = buffer + 6;
+                // Убираем возможные пробелы в начале и кавычки
+                while (*filePath == L' ') filePath++;
                 if (filePath[0] == L'"') {
                     filePath++;
                     wchar_t* endQuote = wcschr(filePath, L'"');
                     if (endQuote) *endQuote = L'\0';
                 }
+                wprintf(L"Клиент запросил файл: %s\n", filePath);
                 SendFileToClient(hPipe, filePath);
                 continue;
             }

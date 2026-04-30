@@ -213,13 +213,14 @@ int main() {
             else if (wcsncmp(buffer, L"/take ", 6) == 0) {
                 wchar_t* filePath = buffer + 6;
                 // Убираем возможные пробелы в начале и кавычки
+                wprintf(L"Клиент запросил файл: %s\n", filePath);
                 while (*filePath == L' ') filePath++;
                 if (filePath[0] == L'"') {
                     filePath++;
                     wchar_t* endQuote = wcschr(filePath, L'"');
                     if (endQuote) *endQuote = L'\0';
                 }
-                wprintf(L"Клиент запросил файл: %s\n", filePath);
+               // wprintf(L"Клиент запросил файл: %s\n", filePath);
                 SendFileToClient(hPipe, filePath);
                 continue;
             }
